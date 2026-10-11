@@ -1,5 +1,24 @@
 from kafka import KafkaConsumer
 import json
+from aggregate import aggregate
+
+
+investor = {
+    "investor_id": 4,
+    "status": "active",
+    "commitment_amount": 1_000_000,
+    "subscribed_amount": 900_000,
+    "currency": "USD",
+}
+
+subscription = {
+    "investor_id": 4,
+    "fund_id": 3,
+    "subscription_amount": 200_000,
+    "currency": "USD",
+}
+
+decision = aggregate(investor, subscription)
 
 consumer = KafkaConsumer(
     "subscription-requests",
@@ -9,6 +28,8 @@ consumer = KafkaConsumer(
     key_deserializer=lambda k: k.decode("utf-8"),
     value_deserializer=lambda v: v.decode("utf-8"),
 )
+
+# decision = aggregate(investor, subscription)
 
 announced = False
 
@@ -24,9 +45,11 @@ try:
             announced = True
         for messages in records.values():
             for message in messages:
-                event = json.loads(message.value)
+                subscription = json.loads(message.value)
                 print(message.partition, message.key,
-                      event["investor_id"], flush=True)
-                print(event["subscription_amount"])
+                      subscription["investor_id"], flush=True)
+                print(subscription["subscription_amount"])
+                decision = aggregate(investor, subscription)
+                print(decision)
 finally:
     consumer.close()

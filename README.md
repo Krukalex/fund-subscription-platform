@@ -4,19 +4,20 @@ A distributed fund subscription pipeline built to learn how message state, the i
 
 A subscription is a contribution to a fund for a particular investor. The original business event is checked against business rules, then committed to stored state. Those rules run inside a saga: an investor service owns the investor aggregate, and a fund service owns the fund aggregate.
 
-Kafka is the transport. Python processors will run the saga and the projection. Postgres is the planned state store.
+Kafka is the transport. Python processors run the saga and, later, the projection. Postgres is the state store for each service that owns an aggregate.
 
 ## Status
 
-Kafka is running locally and a Python client can produce and consume on it. The saga, projection service, and Postgres store are not built yet.
+Kafka is running locally and a Python client can produce and consume on it. The investor rules are implemented. The fund step, the projection, and the investor table are not wired up yet.
 
 | Piece | State |
 | --- | --- |
 | Kafka (single broker, Zookeeper) | Running in Docker |
 | Python producer and consumer | Connectivity checked against the `smoke` topic |
-| Subscription saga | Designed, not implemented |
+| Investor aggregate | Rules implemented in `investor_service/aggregate.py` |
+| Subscription saga | Investor decision only. Fund step not implemented |
 | Projection service | Designed, not implemented |
-| Postgres state store | Planned |
+| Postgres state store | Investor table not wired to the service yet |
 
 ## Flow
 
@@ -141,12 +142,60 @@ Payload fields:
 | `FundCapacityReserved` | Capacity was reserved |
 | `FundCapacityRejected` | Capacity could not be reserved |
 
+## Investor service
+
+The investor service owns the investor aggregate. It reads `subscription-requests` partitioned by `investor_id`, so subscriptions for one investor are applied in order. The service is the only writer of that investor's `subscribed_amount`.
+
+```text
+investor_service/
+  investor_service.py   poll loop
+  aggregate.py          investor rules and the resulting balance
+  repository.py         Postgres read and update, not built yet
+  publisher.py          send the investor outcome, not built yet
+```
+
+`aggregate(investor, subscription)` is a pure decision. It takes the current investor row and one subscription, and it does not talk to Postgres or Kafka. The loop around it will load the row, call `aggregate`, persist `balance` when the decision is `InvestorValidated`, and then publish. Those last two steps are separate on purpose: a crash between them can save the new total and lose the event. A second delivery of the same subscription can add the amount again. The inbox and outbox are left out until that behavior has been seen.
+
+The investor row the rules read:
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `active`, `frozen`, or `closed` |
+| `commitment_amount` | Maximum this investor may subscribe |
+| `subscribed_amount` | Total already accepted. Passed into the aggregate as the current balance |
+| `currency` | Currency this investor deals in |
+
+The first failing check is the result:
+
+| Order | Rule | Rejection |
+| --- | --- | --- |
+| 1 | `subscribed_amount + subscription_amount` must not exceed `commitment_amount` | Over the commitment cap |
+| 2 | `subscription_amount` must be greater than or equal to zero | Negative subscription |
+| 3 | `status` must be `active` | Frozen or closed investor |
+| 4 | Subscription currency must match the investor currency | Currency mismatch |
+
+`fund_id` is not an investor rule. The fund service decides whether the fund exists and whether it has capacity.
+
+The return value:
+
+| `event_type` | `balance` |
+| --- | --- |
+| `InvestorValidated` | `subscribed_amount + subscription_amount`, the total to save |
+| `InvestorRejected` | The current `subscribed_amount`, unchanged |
+| `ProcessingFailed` | `"N/A"` when a required field is missing. Do not write this value |
+
+`message` explains the outcome. `InvestorRejected` is a business result and stays on the saga path. `ProcessingFailed` means the subscription could not be read as an investor decision.
+
+The running loop still passes a sample investor row into `aggregate` for every record. `repository.py` will replace that sample with the Postgres row for `subscription["investor_id"]`.
+
 ## Layout
 
 ```text
-docker/          Kafka and Zookeeper (Confluent 7.4.0)
-emitter/         Python producer and consumer used to verify Kafka
-requirements.txt kafka-python
+docker/              Kafka, Zookeeper, and Postgres
+emitter/             Python producer and consumer used to verify Kafka
+generator/           Transaction generator for subscription requests
+investor_service/    Investor aggregate and its consumer
+requirements.txt     kafka-python
 ```
 
 The broker advertises `localhost:9092` to clients on the host and `kafka:29092` to other containers on the `fund-pipeline` network.
