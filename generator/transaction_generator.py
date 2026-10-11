@@ -7,7 +7,8 @@ import json
 
 producer = KafkaProducer(
     bootstrap_servers=["localhost:9092"],
-    value_serializer=lambda v: json.dumps(v).encode("utf-8")
+    value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+    key_serializer=lambda k: str(k).encode("utf-8")
 )
 
 funds = [
@@ -47,6 +48,11 @@ def generate_transaction() -> dict:
 
 while True:
     transaction = generate_transaction()
-    producer.send("transactions", transaction)
+    producer.send(
+        "subscription-requests",
+        key=str(transaction['investor_id']),
+        value=transaction
+    )
     print(f"Produced: {transaction}")
+    producer.flush()
     time.sleep(10)
